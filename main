@@ -1,0 +1,91 @@
+import os
+import streamlit as st
+from langchain.chat_models import ChatOpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.chains import create_retrieval_chain
+from langchain.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.document_loaders.image import UnstructuredImageLoader
+
+os.environ["OPENAI_API_KEY"] = "EMPTY"
+
+
+image_folder_path = "C:/Users/User/Desktop/Practica/project/testRAG/Screenshot uatbv"
+vectorstore_path = "vectorstore"
+
+llm = ChatOpenAI(
+    model="meta-llama/Meta-Llama-3-70B-Instruct",
+    openai_api_key="EMPTY",
+    openai_api_base="http://localhost:8000/v1",
+    temperature=0,
+)
+
+def load_images_from_folder(folder_path):
+    """
+    Load all images from a folder and extract text using OCR.
+    This function is designed to handle images of forms.
+    """
+    docs = []
+    for filename in os.listdir(folder_path):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')):
+            image_path = os.path.join(folder_path, filename)
+            loader = UnstructuredImageLoader(image_path)
+            data = loader.load()
+            docs.extend(data)
+    return docs
+
+if os.path.exists(vectorstore_path):
+    vectorstore = Chroma(persist_directory=vectorstore_path, embedding_function=HuggingFaceEmbeddings())
+else:
+    docs = load_images_from_folder(image_folder_path)
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splits = text_splitter.split_documents(docs)
+
+    embedding = HuggingFaceEmbeddings()
+    vectorstore = Chroma.from_documents(documents=splits, embedding=embedding, persist_directory=vectorstore_path)
+    vectorstore.persist()  
+
+retriever = vectorstore.as_retriever()
+
+system_prompt = '''
+    You are an assistant that helps users by providing information based on form data extracted from images.
+    The forms contain structured information such as fields, labels, and values.
+    When answering questions, you should focus on providing the specific information contained in these forms.
+    If a user asks about a particular field or value, retrieve the most relevant information from the forms.
+    If you are unsure, inform the user that you don't have the relevant information.
+    \n\n
+    {context}
+'''
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ]
+)
+
+question_answer_chain = create_stuff_documents_chain(llm, prompt)
+rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+# Streamlit Interface
+st.title("ChatGPT-like clone with Image-based Form Retrieval")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+if prompt := st.chat_input("Ask me anything!"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        response = rag_chain.invoke({"input": prompt})
+        content = response["answer"]
+        st.markdown(content)
+        st.session_state.messages.append({"role": "assistant", "content": content})
